@@ -64,7 +64,9 @@ export const useAudioStore = create<AudioStore>((set) => ({
             });
 
             if (!response.ok) {
-                throw new Error(`Server error: ${response.statusText}`);
+                const errorData = await response.json().catch(() => ({}));
+                const message = errorData.error || response.statusText;
+                throw new Error(`Server error: ${message}`);
             }
 
             const data = await response.json();

@@ -20,7 +20,6 @@ const upload = multer({
 });
 
 // Initialize OpenAI
-// Note: If using OpenRouter, set baseURL and apiKey accordingly in .env
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
@@ -35,43 +34,58 @@ app.post("/api/process-audio", upload.single("audio"), async (req, res) => {
   const audioPath = req.file.path;
 
   try {
-    console.log(`[Processing] Started processing for file: ${req.file.originalname}`);
+    console.log("[Pipeline] Reading and encoding audio...");
+    const audioData = fs.readFileSync(audioPath);
+    const base64Audio = audioData.toString("base64");
 
-    // STEP 1: Whisper (Speech-to-Text)
-    console.log("[Pipeline] Step 1: Transcribing...");
-    const transcriptionResponse = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(audioPath),
-      model: "whisper-1",
-    });
+    // Determine mime type (default to webm as per frontend hook)
+    const mimeType = "audio/webm";
 
-    const rawText = transcriptionResponse.text;
-    console.log(`[Pipeline] Transcription complete. Length: ${rawText.length} chars`);
+    console.log("[Pipeline] Sending multimodal request to Gemini 2.0 Flash via OpenRouter...");
 
-    // STEP 2: GPT-4o-mini (Extraction)
-    console.log("[Pipeline] Step 2: Extracting Actions...");
-    const systemPrompt = `Analyze the following transcription.
-Identify explicit Action Items (tasks).
-Extract Deadlines (convert relative dates like 'next Friday' to YYYY-MM-DD based on today's date).
-Identify People assigned to tasks.
-Summarize Key Insights in 2 sentences.
+    const systemPrompt = `You are an AI assistant that processes audio of voice memos.
+Listen carefully to the audio and:
+1. Provide a verbatim transcription.
+2. Identify explicit Action Items (tasks).
+3. Extract Deadlines (convert relative dates like 'next Friday' to YYYY-MM-DD based on today's date ${new Date().toISOString().split('T')[0]}).
+4. Identify People assigned to tasks.
+5. Summarize Key Insights in 2 sentences.
+
 Output strictly in this JSON format:
-{ "tasks": [{ "title": string, "priority": "high"|"medium"|"low", "due_date": string, "assignee": string }], "insights": [string] }`;
+{
+  "transcript": string,
+  "tasks": [{ "title": string, "priority": "high"|"medium"|"low", "due_date": string, "assignee": string }],
+  "insights": [string]
+}`;
 
-    const extractionResponse = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    const response = await openai.chat.completions.create({
+      model: "google/gemini-2.0-flash-001",
       messages: [
         {
           role: "system",
           content: systemPrompt,
         },
-        { role: "user", content: rawText },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Please transcribe and analyze this audio memo."
+            },
+            {
+              type: "image_url", // OpenRouter uses image_url schema for files/audio sometimes, but standard multimodal is better
+              url: `data:${mimeType};base64,${base64Audio}`
+            }
+          ],
+        },
       ],
       response_format: { type: "json_object" },
     });
 
-    const content = extractionResponse.choices[0].message.content;
+    const content = response.choices[0].message.content;
     const structuredData = JSON.parse(content);
-    console.log("[Pipeline] Extraction complete.");
+    console.log("[Pipeline] Processing complete.");
+    console.log(`[Pipeline] Transcript: ${structuredData.transcript?.substring(0, 100)}...`);
 
     // Cleanup
     fs.unlink(audioPath, (err) => {
@@ -80,19 +94,22 @@ Output strictly in this JSON format:
 
     // Return combined data
     res.json({
-      transcript: rawText,
+      transcript: structuredData.transcript || "",
       actions: structuredData.tasks || [],
       insights: structuredData.insights || [],
     });
   } catch (error) {
     console.error("[Error] Processing failed:", error);
-    
+
     // Attempt cleanup on error
     if (fs.existsSync(audioPath)) {
-      fs.unlink(audioPath, () => {});
+      fs.unlink(audioPath, () => { });
     }
 
-    res.status(500).json({ error: error.message });
+    // Pass along more detail if available
+    const statusCode = error.status || 500;
+    const message = error.message || "Internal Server Error";
+    res.status(statusCode).json({ error: message, detail: error.response?.data || null });
   }
 });
 
