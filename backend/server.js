@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const OpenAI = require("openai");
+const Groq = require("groq-sdk");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
@@ -16,97 +17,117 @@ app.use(express.json());
 // Configure Multer for audio uploads
 const upload = multer({
   dest: "uploads/",
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit (Whisper limit)
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
 });
 
-// Initialize OpenAI
+// Initialize Groq for Whisper transcription
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
+
+// Initialize OpenAI (OpenRouter) for LLM analysis
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
 });
 
-// The Double Pipeline Endpoint
+// Two-Stage Pipeline Endpoint
 app.post("/api/process-audio", upload.single("audio"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No audio file provided" });
   }
 
   const audioPath = req.file.path;
+  // Rename file with extension for Groq
+  const audioPathWithExt = audioPath + ".webm";
+  fs.renameSync(audioPath, audioPathWithExt);
 
   try {
-    console.log("[Pipeline] Reading and encoding audio...");
-    const audioData = fs.readFileSync(audioPath);
-    const base64Audio = audioData.toString("base64");
+    // ============================================
+    // STAGE 1: Transcribe with Groq Whisper
+    // ============================================
+    console.log("[Stage 1] Transcribing audio with Groq Whisper...");
 
-    // Determine mime type (default to webm as per frontend hook)
-    const mimeType = "audio/webm";
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(audioPathWithExt),
+      model: "whisper-large-v3-turbo",
+      response_format: "text",
+    });
 
-    console.log("[Pipeline] Sending multimodal request to Gemini 2.0 Flash via OpenRouter...");
+    console.log("[Stage 1] Transcription complete:", transcription);
 
-    const systemPrompt = `You are an AI assistant that processes audio of voice memos.
-Listen carefully to the audio and:
-1. Provide a verbatim transcription.
-2. Identify explicit Action Items (tasks).
-3. Extract Deadlines (convert relative dates like 'next Friday' to YYYY-MM-DD based on today's date ${new Date().toISOString().split('T')[0]}).
-4. Identify People assigned to tasks.
-5. Summarize Key Insights in 2 sentences.
+    if (!transcription || transcription.trim() === "") {
+      throw new Error("Transcription returned empty. Please speak clearly and try again.");
+    }
 
-Output strictly in this JSON format:
+    // ============================================
+    // STAGE 2: Extract tasks with LLM
+    // ============================================
+    console.log("[Stage 2] Extracting tasks with LLM...");
+
+    const today = new Date().toISOString().split('T')[0];
+    const systemPrompt = `You are a professional assistant that extracts actionable information from voice memo transcripts.
+
+CRITICAL INSTRUCTIONS:
+1. The user's transcript is provided below. Do NOT modify or summarize it.
+2. TASKS: Identify explicit tasks mentioned. 
+   - Assign a "priority" (high, medium, or low).
+   - Extract "due_date" (convert relative dates like 'next Friday' or 'tomorrow' to YYYY-MM-DD based on today: ${today}). If no date is mentioned, return null.
+   - Extract "assignee" (the person responsible). If not mentioned, return null.
+3. INSIGHTS: Provide 2-3 concise summary sentences of the key points.
+
+OUTPUT FORMAT:
+Return strictly a JSON object:
 {
-  "transcript": string,
-  "tasks": [{ "title": string, "priority": "high"|"medium"|"low", "due_date": string, "assignee": string }],
-  "insights": [string]
-}`;
+  "tasks": [
+    { "title": "Task description", "priority": "high", "due_date": "YYYY-MM-DD", "assignee": "Name" }
+  ],
+  "insights": ["Point 1", "Point 2"]
+}
+
+If no tasks are found, return an empty array for "tasks".`;
 
     const response = await openai.chat.completions.create({
-      model: "google/gemini-2.0-flash-001",
+      model: process.env.LLM_MODEL || "google/gemini-2.0-flash-001",
       messages: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "Please transcribe and analyze this audio memo."
-            },
-            {
-              type: "image_url", // OpenRouter uses image_url schema for files/audio sometimes, but standard multimodal is better
-              url: `data:${mimeType};base64,${base64Audio}`
-            }
-          ],
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Here is the transcript:\n\n${transcription}` },
       ],
       response_format: { type: "json_object" },
     });
 
     const content = response.choices[0].message.content;
-    const structuredData = JSON.parse(content);
+    console.log("[Stage 2] LLM Response:", content);
+
+    let structuredData;
+    try {
+      structuredData = JSON.parse(content);
+    } catch (parseError) {
+      console.error("[Stage 2] JSON Parse Error:", parseError, "Raw:", content);
+      throw new Error("Failed to parse LLM response as JSON");
+    }
+
     console.log("[Pipeline] Processing complete.");
-    console.log(`[Pipeline] Transcript: ${structuredData.transcript?.substring(0, 100)}...`);
 
     // Cleanup
-    fs.unlink(audioPath, (err) => {
+    fs.unlink(audioPathWithExt, (err) => {
       if (err) console.error("Error deleting temp file:", err);
     });
 
     // Return combined data
     res.json({
-      transcript: structuredData.transcript || "",
-      actions: structuredData.tasks || [],
-      insights: structuredData.insights || [],
+      transcript: transcription,
+      actions: Array.isArray(structuredData.tasks) ? structuredData.tasks : [],
+      insights: Array.isArray(structuredData.insights) ? structuredData.insights : [],
     });
   } catch (error) {
     console.error("[Error] Processing failed:", error);
 
     // Attempt cleanup on error
-    if (fs.existsSync(audioPath)) {
-      fs.unlink(audioPath, () => { });
+    if (fs.existsSync(audioPathWithExt)) {
+      fs.unlink(audioPathWithExt, () => { });
     }
 
-    // Pass along more detail if available
     const statusCode = error.status || 500;
     const message = error.message || "Internal Server Error";
     res.status(statusCode).json({ error: message, detail: error.response?.data || null });

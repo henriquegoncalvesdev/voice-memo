@@ -70,12 +70,13 @@ export const useAudioStore = create<AudioStore>((set) => ({
             }
 
             const data = await response.json();
+            console.log("[AudioStore] Data received from backend:", data);
 
             set({
                 status: 'SUCCESS',
-                transcription: data.transcript,
-                actionItems: data.actions,
-                insights: data.insights,
+                transcription: data.transcript || '',
+                actionItems: Array.isArray(data.actions) ? data.actions : [],
+                insights: Array.isArray(data.insights) ? data.insights : [],
             });
         } catch (error) {
             console.error("Processing failed", error);

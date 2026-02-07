@@ -41,8 +41,9 @@ export const ResultsView = () => {
                         <ActionCard key={idx} item={item} />
                     ))}
                     {actionItems.length === 0 && (
-                        <div className="text-center py-8 text-muted-foreground text-sm">
-                            No tasks found.
+                        <div className="text-center py-12 rounded-xl border border-dashed border-border bg-accent/5">
+                            <p className="text-muted-foreground text-sm font-medium">No tasks found</p>
+                            <p className="text-xs text-muted-foreground/60 mt-1">Try speaking more clearly about your action items</p>
                         </div>
                     )}
                 </div>
