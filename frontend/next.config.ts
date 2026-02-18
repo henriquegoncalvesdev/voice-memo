@@ -7,9 +7,12 @@ const withPWA = require("next-pwa")({
   skipWaiting: true,
 });
 
+const path = require("path");
+
 const nextConfig: NextConfig = {
-  /* config options here */
-  turbopack: {},
+  turbopack: {
+    root: path.resolve(__dirname, "../"),
+  },
   experimental: {
     // serverActions: true, // Enabled by default in Next.js 15
   },
