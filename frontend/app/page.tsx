@@ -28,7 +28,7 @@ export default function Home() {
 
       {/* Header */}
       <header className="z-10 w-full max-w-md flex items-center justify-between pt-4">
-        <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-primary to-purple-400 bg-clip-text text-transparent">
+        <h1 className="text-xl font-bold tracking-tight text-primary">
           EchoAction
         </h1>
         {isSuccess && (
